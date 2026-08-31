@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from dev_workflow.generated_opencode import generated_files
 from scripts.validate_skills import parse_frontmatter, validate_skill
@@ -87,9 +88,12 @@ class OpenCodeGenerationTests(unittest.TestCase):
         )
 
     def test_discoverability_in_isolated_opencode_project_root(self) -> None:
-        binary = shutil.which("opencode")
+        binary = os.environ.get("DEV_WORKFLOW_OPENCODE_TEST_BINARY") or shutil.which(
+            "opencode"
+        )
         if binary is None:
             self.skipTest("opencode is not installed")
+        binary = str(Path(binary).resolve())
         version = subprocess.run(
             [binary, "--version"],
             text=True,
@@ -109,7 +113,33 @@ class OpenCodeGenerationTests(unittest.TestCase):
             target = project / ".opencode" / "skills"
             target.parent.mkdir(parents=True)
             shutil.copytree(BUNDLE / "skills", target)
-            env = os.environ.copy()
+            self.assertEqual(
+                sorted(
+                    path.relative_to(target).as_posix()
+                    for path in target.rglob("SKILL.md")
+                ),
+                ["grill-me/SKILL.md", "grilling/SKILL.md"],
+            )
+
+            # Review and CI runners commonly disable project config while
+            # inspecting a repository. That ambient setting must not disable
+            # the isolated project-local surface this probe is testing.
+            contaminated = {
+                "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+                "OPENCODE_CONFIG": str(root / "ambient-opencode.json"),
+                "OPENCODE_CONFIG_CONTENT": '{"skills":{"paths":[]}}',
+                "OPENCODE_CONFIG_DIR": str(root / "ambient-config"),
+                "OPENCODE_FAKE_VCS": "git",
+            }
+            with mock.patch.dict(os.environ, contaminated, clear=False):
+                env = os.environ.copy()
+            for variable in (
+                "OPENCODE_CONFIG",
+                "OPENCODE_CONFIG_CONTENT",
+                "OPENCODE_CONFIG_DIR",
+                "OPENCODE_FAKE_VCS",
+            ):
+                env.pop(variable, None)
             env.update(
                 {
                     "HOME": str(root / "home"),
@@ -119,6 +149,7 @@ class OpenCodeGenerationTests(unittest.TestCase):
                     "XDG_STATE_HOME": str(root / "state"),
                     "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1",
                     "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1",
+                    "OPENCODE_DISABLE_PROJECT_CONFIG": "0",
                 }
             )
             result = subprocess.run(
