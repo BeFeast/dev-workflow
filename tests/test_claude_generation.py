@@ -73,12 +73,11 @@ class ClaudeGenerationTests(unittest.TestCase):
         primitive = (HARNESS / "skills/grilling/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("disable-model-invocation: true", wrapper)
         self.assertIn("user-invocable: false", primitive)
-        self.assertIn("`Skill` tool with `grilling`", wrapper)
+        self.assertIn("linked `grilling` skill", wrapper)
         self.assertNotIn("AskUserQuestion", wrapper)
-        self.assertIn("AskUserQuestion", primitive)
-        self.assertIn("call `ExitPlanMode`", primitive)
-        self.assertIn("separately as Claude Code requires", primitive)
-        self.assertIn("not approval to execute a plan", primitive)
+        self.assertIn("`AskUserQuestion` in Claude Code", primitive)
+        self.assertIn("Map this as a **design tree**", primitive)
+        self.assertNotIn("❓ **Q1**", primitive)
 
     def test_generated_files_retain_upstream_mit_notice(self) -> None:
         manifest = json.loads(generated_files()["bundle.json"])

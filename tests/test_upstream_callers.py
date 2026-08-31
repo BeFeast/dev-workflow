@@ -87,9 +87,9 @@ class UpstreamCallerCompatibilityTests(unittest.TestCase):
 
     def test_every_harness_satisfies_model_invoked_grilling_edge(self) -> None:
         spellings = {
-            "codex": "model-invoked `$grilling` skill",
-            "claude": "`Skill` tool with `grilling`",
-            "opencode": "OpenCode's `skill` tool",
+            "codex": "linked `$grilling` skill",
+            "claude": "linked `grilling` skill",
+            "opencode": "linked `grilling` skill",
         }
         for harness, spelling in spellings.items():
             bundle = ROOT / "harnesses" / harness
@@ -99,9 +99,9 @@ class UpstreamCallerCompatibilityTests(unittest.TestCase):
             wrapper = (bundle / "skills/grill-me/SKILL.md").read_text(encoding="utf-8")
             primitive = (bundle / "skills/grilling/SKILL.md").read_text(encoding="utf-8")
             self.assertIn(spelling, wrapper)
-            self.assertRegex(primitive, re.compile(r"\bWait\b", re.IGNORECASE))
-            self.assertRegex(primitive, re.compile(r"\bRepeat\b", re.IGNORECASE))
-            self.assertIn("confirmation", primitive.casefold())
+            self.assertIn("Then wait for the user's answers", primitive)
+            self.assertIn("Recompute the frontier and ask the next round", primitive)
+            self.assertIn("until the user confirms", primitive)
 
     def test_default_portable_artifact_does_not_bundle_callers_or_siblings(self) -> None:
         excluded = set(EXPECTED_CALLERS) | {

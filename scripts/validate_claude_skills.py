@@ -70,7 +70,7 @@ def validate_bundle(root: Path) -> list[str]:
 
     wrapper = parsed.get("grill-me")
     primitive = parsed.get("grilling")
-    if wrapper and "`Skill` tool with `grilling`" not in wrapper[1]:
+    if wrapper and "linked `grilling` skill" not in wrapper[1]:
         errors.append("grill-me: wrapper must invoke the linked grilling primitive")
     if primitive and "AskUserQuestion" not in primitive[1]:
         errors.append("grilling: primitive must own AskUserQuestion behavior")
