@@ -250,6 +250,18 @@ def normalize_model_output(
     ):
         raise ValueError("model-facing question result has an unexpected envelope")
 
+    structural_delimiters = [
+        f'", "{question.prompt}"="' for question in questions[1:]
+    ]
+    structural_delimiters.append('"' + MODEL_OUTPUT_SUFFIX)
+    for delimiter in structural_delimiters:
+        occurrences = output.count(delimiter)
+        if occurrences != 1:
+            raise ValueError(
+                "model-facing question result has an ambiguous structural "
+                f"delimiter ({occurrences} occurrences)"
+            )
+
     position = len(MODEL_OUTPUT_PREFIX)
     normalized: dict[str, str] = {}
     for index, question in enumerate(questions):

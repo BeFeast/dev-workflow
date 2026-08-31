@@ -67,6 +67,8 @@ class OpenCodeGenerationTests(unittest.TestCase):
         self.assertIn("native ordered `string[][]` only in internal tool metadata", primitive)
         self.assertIn("model does not receive an `answers` object", primitive)
         self.assertIn("model-facing tool result", primitive)
+        self.assertIn("occurs exactly once", primitive)
+        self.assertIn("reject the round without remapping", primitive)
         self.assertIn("`multiple`", primitive)
         self.assertIn("do not assume `opencode run`", primitive)
         self.assertIn("Snapshot the complete frontier", primitive)
@@ -88,6 +90,19 @@ class OpenCodeGenerationTests(unittest.TestCase):
         binary = shutil.which("opencode")
         if binary is None:
             self.skipTest("opencode is not installed")
+        version = subprocess.run(
+            [binary, "--version"],
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        if version.returncode != 0 or version.stdout.strip() != "1.18.25":
+            observed = (version.stdout or version.stderr).strip() or "unavailable"
+            self.skipTest(
+                "isolated discovery is pinned to the verified OpenCode 1.18.25 "
+                f"surface; observed {observed}"
+            )
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             project = root / "project"

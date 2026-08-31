@@ -114,9 +114,12 @@ order. For `multiple: true`, OpenCode has already joined selected labels with
 comma-space inside that question's answer; preserve the surfaced order but do
 not claim access to the original inner array. Preserve custom text as surfaced.
 Treat `Unanswered`, a missing entry, an order mismatch, or a malformed result
-as incomplete rather than inventing an answer. Apply answers only after the
-complete snapshot is represented, then reshape the tree and recompute the
-frontier.
+as incomplete rather than inventing an answer. Before associating entries,
+verify that every expected next-question boundary and the final result
+terminator occurs exactly once. More than one occurrence is ambiguous custom
+text, not a second decision; reject the round without remapping it. Apply
+answers only after the complete snapshot is represented, then reshape the tree
+and recompute the frontier.
 
 ## Use the unavailable-tool fallback
 
