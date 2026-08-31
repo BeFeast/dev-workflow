@@ -102,12 +102,21 @@ Keep option labels to at most five words after adding the suffix. Do not add an
 adds its custom-answer UI by default and its model-call schema does not accept
 that field.
 
-The tool returns `answers` as an ordered `string[][]`: one inner array for each
-submitted question. Map answers to the snapshot by positional index, not by
-label or header. Preserve selection order for `multiple: true` and preserve
-custom text verbatim after trimming surrounding whitespace. Reject missing,
-extra, empty, or malformed answer arrays. Apply answers only after the complete
-snapshot is present, then reshape the tree and recompute the frontier.
+OpenCode keeps the native ordered `string[][]` only in internal tool metadata;
+the model does not receive an `answers` object. The model-facing tool result is
+a string in this shape:
+
+`User has answered your questions: "<prompt>"="<answer>", "<next
+prompt>"="<answer>". You can now continue with the user's answers in mind.`
+
+Read those quoted prompt/answer entries in the original submitted question
+order. For `multiple: true`, OpenCode has already joined selected labels with
+comma-space inside that question's answer; preserve the surfaced order but do
+not claim access to the original inner array. Preserve custom text as surfaced.
+Treat `Unanswered`, a missing entry, an order mismatch, or a malformed result
+as incomplete rather than inventing an answer. Apply answers only after the
+complete snapshot is represented, then reshape the tree and recompute the
+frontier.
 
 ## Use the unavailable-tool fallback
 

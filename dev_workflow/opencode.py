@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 import re
 import subprocess
-from typing import Callable, Mapping, Sequence
+from typing import Callable, Sequence
 
 from .grilling import Option, Question, RoundSnapshot
 
@@ -222,43 +222,66 @@ def serialize_native(
     return {"questions": payload}
 
 
-def normalize_native_response(
-    questions: Sequence[Question],
-    response: Mapping[str, object],
-    *,
-    multiple_question_ids: frozenset[str] = frozenset(),
+MODEL_OUTPUT_PREFIX = "User has answered your questions: "
+MODEL_OUTPUT_SUFFIX = ". You can now continue with the user's answers in mind."
+
+
+def normalize_model_output(
+    questions: Sequence[Question], output: str
 ) -> dict[str, str]:
-    """Map OpenCode's ordered ``string[][]`` answers to stable question ids."""
+    """Map OpenCode's model-facing formatted result to stable question ids.
 
-    raw_answers = response.get("answers")
-    if not isinstance(raw_answers, (list, tuple)):
-        raise ValueError("native response must contain an ordered answers array")
-    if len(raw_answers) != len(questions):
-        raise ValueError("native answer count does not match the submitted questions")
+    OpenCode 1.18.25 keeps the native ordered ``string[][]`` only in internal
+    tool metadata.  The model receives a formatted string whose quoted entries
+    follow the submitted question order and whose multi-select values have
+    already been joined with ``, ``.  This parser deliberately consumes that
+    real interface and does not pretend the private metadata is available.
+    """
 
-    question_ids = {question.id for question in questions}
-    unknown_multiple = multiple_question_ids - question_ids
-    if unknown_multiple:
+    if not isinstance(output, str):
         raise ValueError(
-            f"multiple question ids are not in this response: {sorted(unknown_multiple)}"
+            "model-facing question result must be formatted text; "
+            "native answers metadata is not exposed to the model"
         )
+    if not questions:
+        raise ValueError("model-facing question result needs submitted questions")
+    if not output.startswith(MODEL_OUTPUT_PREFIX) or not output.endswith(
+        MODEL_OUTPUT_SUFFIX
+    ):
+        raise ValueError("model-facing question result has an unexpected envelope")
 
+    position = len(MODEL_OUTPUT_PREFIX)
     normalized: dict[str, str] = {}
-    for question, raw in zip(questions, raw_answers, strict=True):
-        if not isinstance(raw, (list, tuple)) or not raw:
+    for index, question in enumerate(questions):
+        marker = f'"{question.prompt}"="'
+        if not output.startswith(marker, position):
             raise ValueError(
-                f"native answer for {question.id!r} must be a non-empty string array"
+                f"model-facing answer {index + 1} does not match the submitted question order"
             )
-        if question.id not in multiple_question_ids and len(raw) != 1:
+        value_start = position + len(marker)
+        if index + 1 < len(questions):
+            next_question = questions[index + 1]
+            delimiter = f'", "{next_question.prompt}"="'
+            value_end = output.find(delimiter, value_start)
+            if value_end < 0:
+                raise ValueError(
+                    f"model-facing answer for {question.id!r} is missing its ordered successor"
+                )
+            position = value_end + 3
+        else:
+            delimiter = '"' + MODEL_OUTPUT_SUFFIX
+            value_end = output.find(delimiter, value_start)
+            if value_end < 0 or value_end + len(delimiter) != len(output):
+                raise ValueError(
+                    f"model-facing answer for {question.id!r} has a malformed terminator"
+                )
+
+        value = output[value_start:value_end].strip()
+        if not value or value == "Unanswered":
             raise ValueError(
-                f"single-select answer for {question.id!r} must contain one value"
+                f"model-facing answer for {question.id!r} is unanswered"
             )
-        if any(not isinstance(value, str) or not value.strip() for value in raw):
-            raise ValueError(
-                f"native answer for {question.id!r} must contain non-empty strings"
-            )
-        values = [value.strip() for value in raw]
-        normalized[question.id] = " — ".join(values)
+        normalized[question.id] = value
     return normalized
 
 
