@@ -12,6 +12,7 @@ from .multiharness import HARNESS_REGISTRY, sha256_bytes, verify_portable_bundle
 RECEIPT_NAMESPACE = ".dev-workflow"
 RECEIPT_NAME = "install-receipt.json"
 RECEIPT_SCHEMA_VERSION = 2
+TERMINAL_RECEIPT_NAME = "uninstall-receipt.json"
 QUARANTINE_NAME = "uninstall-quarantine"
 QUARANTINE_PHASE = "staged"
 
@@ -332,9 +333,17 @@ def install_selection(
     target_root.mkdir(parents=True, exist_ok=True)
     receipt_relative = Path(RECEIPT_NAMESPACE) / harness / RECEIPT_NAME
     receipt_path = _target_path(target_root, receipt_relative)
+    terminal_receipt_relative = (
+        Path(RECEIPT_NAMESPACE) / f"{harness}-{TERMINAL_RECEIPT_NAME}"
+    )
+    terminal_receipt_path = _target_path(target_root, terminal_receipt_relative)
     metadata_root = receipt_path.parent
     if metadata_root.exists() or metadata_root.is_symlink():
         raise FileExistsError(f"install metadata already exists: {metadata_root}")
+    if terminal_receipt_path.exists() or terminal_receipt_path.is_symlink():
+        raise FileExistsError(
+            f"terminal uninstall metadata already exists: {terminal_receipt_path}"
+        )
 
     install_root = _safe_relative(spec.install_subdir)
     for name in resolved:
@@ -390,9 +399,23 @@ def uninstall_selection(target_root: Path, harness: str) -> tuple[str, ...]:
         raise ValueError(f"unknown harness {harness!r}")
     receipt_relative = Path(RECEIPT_NAMESPACE) / harness / RECEIPT_NAME
     receipt_path = _target_path(target_root, receipt_relative)
-    if receipt_path.is_symlink():
-        raise ValueError("install receipt must not be a symlink")
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    terminal_receipt_relative = (
+        Path(RECEIPT_NAMESPACE) / f"{harness}-{TERMINAL_RECEIPT_NAME}"
+    )
+    terminal_receipt_path = _target_path(target_root, terminal_receipt_relative)
+    for candidate in (receipt_path, terminal_receipt_path):
+        if candidate.is_symlink() or (
+            candidate.exists() and not candidate.is_file()
+        ):
+            raise ValueError("install receipt must be a regular non-symlink file")
+    receipt_exists = receipt_path.is_file()
+    terminal_phase = terminal_receipt_path.is_file()
+    if receipt_exists == terminal_phase:
+        if receipt_exists:
+            raise ValueError("normal and terminal install receipts both exist")
+        raise FileNotFoundError(f"install receipt is missing: {receipt_path}")
+    active_receipt_path = terminal_receipt_path if terminal_phase else receipt_path
+    receipt = json.loads(active_receipt_path.read_text(encoding="utf-8"))
     if (
         receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
         or receipt.get("harness") != harness
@@ -463,7 +486,12 @@ def uninstall_selection(target_root: Path, harness: str) -> tuple[str, ...]:
     for original, quarantine, record in staged:
         original_exists = _checked_owned_file(original, record)
         quarantine_exists = _checked_owned_file(quarantine, record)
-        if staged_phase:
+        if terminal_phase:
+            if original_exists or quarantine_exists:
+                raise ValueError(
+                    "terminal uninstall unexpectedly has canonical files"
+                )
+        elif staged_phase:
             if original_exists:
                 raise ValueError("staged uninstall unexpectedly has original files")
         elif original_exists == quarantine_exists:
@@ -472,23 +500,40 @@ def uninstall_selection(target_root: Path, harness: str) -> tuple[str, ...]:
             )
         states.append((original_exists, quarantine_exists))
 
-    if not staged_phase:
-        for (original, quarantine, _), (original_exists, _) in zip(staged, states):
-            if original_exists:
-                _create_parent_directories(quarantine, target_root, [])
-                original.rename(quarantine)
-        phase_marker.mkdir()
+    if not terminal_phase:
+        if not staged_phase:
+            for (original, quarantine, _), (original_exists, _) in zip(
+                staged, states
+            ):
+                if original_exists:
+                    _create_parent_directories(quarantine, target_root, [])
+                    original.rename(quarantine)
+            phase_marker.mkdir()
 
-    for _, quarantine, _ in staged:
-        if quarantine.is_symlink():
-            raise ValueError("staged uninstall file became a symlink")
-        if quarantine.exists():
-            quarantine.unlink()
-    receipt_path.unlink()
+        for _, quarantine, _ in staged:
+            if quarantine.is_symlink():
+                raise ValueError("staged uninstall file became a symlink")
+            if quarantine.exists():
+                quarantine.unlink()
+        receipt_path.rename(terminal_receipt_path)
+
     _remove_empty_owned_tree(quarantine_root)
 
     install_root = _safe_relative(spec.install_subdir)
-    for name in canonical_resolved:
-        _remove_empty_owned_tree(_target_path(target_root, install_root / name))
+    owned_leaf_roots = [
+        _target_path(target_root, install_root / name)
+        for name in canonical_resolved
+    ]
+    for leaf_root in owned_leaf_roots:
+        _remove_empty_owned_tree(leaf_root)
     _remove_empty_owned_tree(metadata_root)
+    remaining = [
+        path
+        for path in [quarantine_root, *owned_leaf_roots, metadata_root]
+        if path.exists() or path.is_symlink()
+    ]
+    if remaining:
+        names = ", ".join(path.as_posix() for path in remaining)
+        raise ValueError(f"terminal uninstall cleanup is incomplete: {names}")
+    terminal_receipt_path.unlink()
     return canonical_resolved
