@@ -306,17 +306,17 @@ def install_selection(
             target = _target_path(target_root, relative)
             _create_parent_directories(target, target_root, created_directories)
             with target.open("xb") as output:
+                created.append(target)
                 output.write(content)
-            created.append(target)
         _create_parent_directories(receipt_path, target_root, created_directories)
         receipt["directories"] = sorted(
             directory.relative_to(target_root).as_posix()
             for directory in created_directories
         )
         with receipt_path.open("x", encoding="utf-8") as output:
+            created.append(receipt_path)
             output.write(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
-        created.append(receipt_path)
-    except Exception:
+    except BaseException:
         for target in reversed(created):
             if target.is_file() or target.is_symlink():
                 target.unlink()

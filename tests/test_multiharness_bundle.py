@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from dev_workflow.bundle import install_selection, uninstall_selection
 from dev_workflow.multiharness import (
@@ -287,6 +288,47 @@ class MultiHarnessBundleTests(unittest.TestCase):
                 install_selection(artifact, isolated, "opencode", ["grill-me"])
             self.assertEqual(existing.read_text(encoding="utf-8"), "existing\n")
             self.assertFalse((isolated / ".dev-workflow/opencode").exists())
+
+    def test_interrupted_write_rolls_back_file_and_created_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "artifact"
+            isolated = root / "isolated"
+            build_portable_bundle(artifact)
+            interrupted = isolated / ".codex/skills/grilling/SKILL.md"
+            original_open = Path.open
+
+            class InterruptedWriter:
+                def __init__(self, handle):
+                    self.handle = handle
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    self.handle.close()
+
+                def write(self, content):
+                    self.handle.write(content[:1])
+                    raise KeyboardInterrupt
+
+            def interrupt_one_write(path, mode="r", *args, **kwargs):
+                handle = original_open(path, mode, *args, **kwargs)
+                if path == interrupted and mode == "xb":
+                    return InterruptedWriter(handle)
+                return handle
+
+            with patch.object(Path, "open", new=interrupt_one_write):
+                with self.assertRaises(KeyboardInterrupt):
+                    install_selection(artifact, isolated, "codex", ["grilling"])
+
+            self.assertFalse(interrupted.exists())
+            self.assertFalse((isolated / ".codex").exists())
+            self.assertFalse((isolated / ".dev-workflow").exists())
+            self.assertEqual(
+                install_selection(artifact, isolated, "codex", ["grilling"]),
+                ("grilling",),
+            )
 
     def test_general_cli_requires_harness_and_round_trips_fixture_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
