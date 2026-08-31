@@ -40,5 +40,11 @@ An adapter may only:
 - normalize native and custom answers into the canonical answer shape;
 - state the unavailable capability and use the documented fallback.
 
+The Codex adapter further constrains each native question prompt to one
+sentence and each option description to one short sentence, regardless of the
+more permissive prose shape in the upstream skill. Its two or three choices
+must be mutually exclusive; this semantic requirement stays in the skill and
+fixtures because a serializer cannot infer exclusivity from arbitrary prose.
+
 An adapter must not invent a neutral tool name, change the frontier, answer for
 the user, silently claim native interaction, or recompute between chunks.

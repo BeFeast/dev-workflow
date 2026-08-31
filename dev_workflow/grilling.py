@@ -210,7 +210,9 @@ class DesignTree:
             if not value:
                 raise ValueError(f"answer for {question.id!r} must be non-empty")
             known_labels = {option.label for option in question.options}
-            canonical_value = value.removesuffix(" (Recommended)")
+            canonical_value = value.removesuffix(" (Recommended)").removesuffix(
+                " (recommended)"
+            )
             answers[question.id] = Answer(
                 question_id=question.id,
                 value=canonical_value if canonical_value in known_labels else value,

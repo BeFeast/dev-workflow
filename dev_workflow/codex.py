@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import re
 from typing import Mapping, Sequence
 
 from .grilling import Option, Question, RoundSnapshot
@@ -11,11 +12,41 @@ from .grilling import Option, Question, RoundSnapshot
 
 CODEX_MAX_QUESTIONS = 3
 CODEX_MAX_OPTIONS = 3
+CODEX_MAX_PROMPT_CHARS = 240
+CODEX_MAX_DESCRIPTION_CHARS = 160
+MULTIPLE_SENTENCES = re.compile(r"[.!?](?:[\"')\]]+)?\s+\S")
 
 
 class Surface(str, Enum):
     NATIVE = "request_user_input"
     FALLBACK = "text-fallback"
+
+
+class ConfirmationDisposition(str, Enum):
+    CONFIRMED = "confirmed"
+    REOPEN = "reopen"
+    EXTEND = "extend"
+
+
+@dataclass(frozen=True)
+class ConfirmationResult:
+    disposition: ConfirmationDisposition
+    concern: str | None = None
+
+    @property
+    def may_act(self) -> bool:
+        return self.disposition is ConfirmationDisposition.CONFIRMED
+
+    @property
+    def continue_interview(self) -> bool:
+        return not self.may_act
+
+    @property
+    def extends_tree(self) -> bool:
+        return self.disposition in {
+            ConfirmationDisposition.REOPEN,
+            ConfirmationDisposition.EXTEND,
+        }
 
 
 @dataclass(frozen=True)
@@ -62,10 +93,25 @@ def serialize_native(questions: Sequence[Question]) -> dict[str, list[dict[str, 
     for question in questions:
         if len(question.header) > 12:
             raise ValueError(f"Codex header for {question.id!r} exceeds 12 characters")
+        if (
+            MULTIPLE_SENTENCES.search(question.prompt.strip())
+            or len(question.prompt) > CODEX_MAX_PROMPT_CHARS
+        ):
+            raise ValueError(
+                f"Codex prompt for {question.id!r} must be one short sentence"
+            )
         if not 2 <= len(question.options) <= CODEX_MAX_OPTIONS:
             raise ValueError(f"Codex question {question.id!r} needs two or three options")
         if any(not 1 <= len(option.label.split()) <= 5 for option in question.options):
             raise ValueError(f"Codex option labels for {question.id!r} need one to five words")
+        if any(
+            MULTIPLE_SENTENCES.search(option.description.strip())
+            or len(option.description) > CODEX_MAX_DESCRIPTION_CHARS
+            for option in question.options
+        ):
+            raise ValueError(
+                f"Codex option descriptions for {question.id!r} must be one short sentence"
+            )
         ordered = (
             question.options[question.recommended],
             *(
@@ -80,7 +126,8 @@ def serialize_native(questions: Sequence[Question]) -> dict[str, list[dict[str, 
         ]
         if any(len(option["label"].split()) > 5 for option in native_options):
             raise ValueError(
-                f"Codex option labels for {question.id!r} exceed five words after recommendation marking"
+                f"Codex option labels for {question.id!r} exceed five words "
+                "after recommendation marking"
             )
         payload.append(
             {
@@ -129,7 +176,7 @@ def render_fallback(questions: Sequence[Question], reason: str) -> str:
     for index, question in enumerate(questions, start=1):
         lines.append(f"{index}. {question.header}: {question.prompt}")
         for option_index, option in enumerate(question.options):
-            marker = " (recommended)" if option_index == question.recommended else ""
+            marker = " (Recommended)" if option_index == question.recommended else ""
             lines.append(f"   - {option.label}{marker}: {option.description}")
         lines.append("   - Other: provide a custom answer.")
     lines.append("")
@@ -148,3 +195,17 @@ def confirmation_question() -> Question:
         ),
         recommended=0,
     )
+
+
+def resolve_confirmation(value: str) -> ConfirmationResult:
+    """Gate action on one explicit confirmation; every other answer continues."""
+
+    answer = value.strip()
+    if not answer:
+        raise ValueError("confirmation answer must be non-empty")
+    canonical = answer.removesuffix(" (Recommended)").removesuffix(" (recommended)")
+    if canonical == "Confirmed":
+        return ConfirmationResult(ConfirmationDisposition.CONFIRMED)
+    if canonical == "Reopen":
+        return ConfirmationResult(ConfirmationDisposition.REOPEN)
+    return ConfirmationResult(ConfirmationDisposition.EXTEND, concern=answer)

@@ -85,12 +85,14 @@ the native questionnaire UI.
 ## Ask a native Codex round
 
 - Send one to three questions per `request_user_input` call.
-- Use a header of at most 12 characters, a stable `snake_case` id, and two or
-  three options with 1-5 word labels.
+- Write each question prompt as exactly one short sentence. Use a header of at
+  most 12 characters, a stable `snake_case` id, and two or three options with
+  1-5 word labels.
+- Make the two or three choices mutually exclusive. Give each choice one short
+  sentence that explains its impact or trade-off.
 - Put the recommended option first and suffix its label with `(Recommended)`.
 - Keep the recommended base label to at most four words so the suffix stays
   within the five-word label limit.
-- Explain one impact or trade-off in each option description.
 - Do not add an `Other` option; the native client supplies the free-form escape.
 
 If the frontier snapshot has more than three questions, partition that snapshot

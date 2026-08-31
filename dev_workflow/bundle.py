@@ -1,4 +1,4 @@
-"""Selective bundle materialization used by isolated fixture tests."""
+"""Dependency-aware selective materialization for the Codex bundle."""
 
 from __future__ import annotations
 
@@ -37,17 +37,42 @@ def resolve_skills(manifest: dict, selected: list[str]) -> tuple[str, ...]:
     return tuple(resolved)
 
 
-def materialize_fixture(bundle_root: Path, target_root: Path, selected: list[str]) -> tuple[str, ...]:
-    """Copy a selection and its linked dependencies into an isolated target."""
+def materialize_selection(
+    bundle_root: Path, target_root: Path, selected: list[str]
+) -> tuple[str, ...]:
+    """Copy a complete portable selection into an empty isolated target.
+
+    The output is shaped like a Codex skill root, but issue #1 callers use only
+    temporary or otherwise isolated targets.  Live installation remains a
+    separate approval-gated delivery concern.
+    """
 
     manifest = json.loads((bundle_root / "bundle.json").read_text(encoding="utf-8"))
     resolved = resolve_skills(manifest, selected)
     target_root.mkdir(parents=True, exist_ok=True)
+    if any(target_root.iterdir()):
+        raise FileExistsError(f"selection target must be empty: {target_root}")
+
     for name in resolved:
         relative = manifest["skills"][name]["path"]
         source = bundle_root / relative
         target = target_root / name
-        if target.exists():
-            raise FileExistsError(f"fixture target already exists: {target}")
         shutil.copytree(source, target)
+
+    selected_manifest = {
+        **{key: value for key, value in manifest.items() if key != "skills"},
+        "selected": selected,
+        "skills": {
+            name: {**manifest["skills"][name], "path": name}
+            for name in resolved
+        },
+    }
+    (target_root / "dev-workflow-bundle.json").write_text(
+        json.dumps(selected_manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    shutil.copyfile(
+        bundle_root / "UPSTREAM_LICENSE",
+        target_root / "dev-workflow-UPSTREAM_LICENSE",
+    )
     return resolved

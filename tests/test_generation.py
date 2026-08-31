@@ -68,6 +68,8 @@ class GenerationTests(unittest.TestCase):
         self.assertIn("Use `request_user_input`", primitive)
         self.assertIn("partition that snapshot", primitive)
         self.assertIn("Do not assume availability", primitive)
+        self.assertIn("choices mutually exclusive", primitive)
+        self.assertIn("one short", primitive)
         self.assertIn("allow_implicit_invocation: false", wrapper_metadata)
         self.assertIn("allow_implicit_invocation: true", primitive_metadata)
 
