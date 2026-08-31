@@ -1,10 +1,19 @@
-"""Dependency-aware selective materialization for the Codex bundle."""
+"""Dependency-aware selection plus receipt-owned isolated installation."""
 
 from __future__ import annotations
 
 import json
 import shutil
 from pathlib import Path
+
+from .multiharness import HARNESS_REGISTRY, sha256_bytes, verify_portable_bundle
+
+
+RECEIPT_NAMESPACE = ".dev-workflow"
+RECEIPT_NAME = "install-receipt.json"
+RECEIPT_SCHEMA_VERSION = 2
+QUARANTINE_NAME = "uninstall-quarantine"
+QUARANTINE_PHASE = "staged"
 
 
 def resolve_skills(manifest: dict, selected: list[str]) -> tuple[str, ...]:
@@ -76,3 +85,410 @@ def materialize_selection(
         target_root / "dev-workflow-UPSTREAM_LICENSE",
     )
     return resolved
+
+
+def _safe_relative(value: str) -> Path:
+    path = Path(value)
+    if path.is_absolute() or not path.parts or ".." in path.parts:
+        raise ValueError(f"unsafe bundle path: {value!r}")
+    return path
+
+
+def _harness_bundle_root(source_root: Path, harness: str) -> Path:
+    if harness not in HARNESS_REGISTRY:
+        raise ValueError(f"unknown harness {harness!r}")
+    if (source_root / "manifest.json").is_file():
+        verify_portable_bundle(source_root)
+        candidate = source_root / "harnesses" / harness
+    elif (source_root / harness / "bundle.json").is_file():
+        candidate = source_root / harness
+    elif source_root.name == harness and (source_root / "bundle.json").is_file():
+        candidate = source_root
+    else:
+        raise ValueError(f"cannot find {harness!r} bundle under {source_root}")
+    if not (candidate / "bundle.json").is_file():
+        raise ValueError(f"{harness!r} bundle metadata is missing")
+    return candidate
+
+
+def _canonical_harness_files(harness: str) -> tuple[dict, dict[str, bytes]]:
+    spec = HARNESS_REGISTRY[harness]
+    generated = spec.generated_files()
+    files = {
+        _safe_relative(relative).as_posix(): content.encode("utf-8")
+        for relative, content in generated.items()
+    }
+    manifest = json.loads(files["bundle.json"].decode("utf-8"))
+    if manifest.get("harness") != spec.manifest_harness:
+        raise ValueError(f"canonical bundle does not describe {harness!r}")
+    return manifest, files
+
+
+def _verify_harness_bundle(bundle_root: Path, harness: str) -> tuple[dict, dict[str, bytes]]:
+    """Require an exact regular-file copy of the pinned harness generator."""
+
+    if bundle_root.is_symlink() or not bundle_root.is_dir():
+        raise ValueError(f"{harness!r} bundle root must be a regular directory")
+    manifest, expected = _canonical_harness_files(harness)
+    actual: dict[str, bytes] = {}
+    for path in bundle_root.rglob("*"):
+        relative = path.relative_to(bundle_root).as_posix()
+        if path.is_symlink():
+            raise ValueError(f"bundle contains a symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError(f"bundle contains a special entry: {relative}")
+        actual[relative] = path.read_bytes()
+    if actual != expected:
+        raise ValueError(f"{harness!r} bundle differs from its pinned generator")
+    return manifest, actual
+
+
+def _target_path(root: Path, relative: Path) -> Path:
+    target = root / relative
+    resolved_root = root.resolve()
+    resolved_target = target.resolve()
+    if resolved_target != resolved_root and resolved_root not in resolved_target.parents:
+        raise ValueError(f"target path escapes the isolated root: {relative}")
+    return target
+
+
+def _create_parent_directories(
+    target: Path, root: Path, created: list[Path]
+) -> None:
+    """Create target parents while recording only directories this call owns."""
+
+    resolved_root = root.resolve()
+    missing: list[Path] = []
+    current = target.parent
+    while current.resolve() != resolved_root:
+        if resolved_root not in current.resolve().parents:
+            raise ValueError(f"target parent escapes the isolated root: {target}")
+        if current.exists() or current.is_symlink():
+            if current.is_symlink() or not current.is_dir():
+                raise ValueError(f"target parent is not a safe directory: {current}")
+            break
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            if directory.is_symlink() or not directory.is_dir():
+                raise ValueError(
+                    f"target parent is not a safe directory: {directory}"
+                )
+        else:
+            created.append(directory)
+
+
+def _selection_plan(
+    harness: str,
+    manifest: dict,
+    bundle_files: dict[str, bytes],
+    selected: list[str],
+) -> tuple[tuple[str, ...], list[tuple[Path, bytes]]]:
+    """Return the canonical dependency closure and complete install inventory."""
+
+    spec = HARNESS_REGISTRY[harness]
+    resolved = resolve_skills(manifest, selected)
+    install_root = _safe_relative(spec.install_subdir)
+    planned: list[tuple[Path, bytes]] = []
+    for name in resolved:
+        source_root = _safe_relative(manifest["skills"][name]["path"])
+        prefix = source_root.as_posix().rstrip("/") + "/"
+        skill_files = [
+            (relative, content)
+            for relative, content in bundle_files.items()
+            if relative.startswith(prefix)
+        ]
+        if not skill_files:
+            raise ValueError(f"canonical bundle skill has no files: {name}")
+        for relative, content in skill_files:
+            source_relative = Path(relative).relative_to(source_root)
+            planned.append((install_root / name / source_relative, content))
+
+    selection = {
+        **{key: value for key, value in manifest.items() if key != "skills"},
+        "selected": selected,
+        "resolved": list(resolved),
+        "skills": {
+            name: {**manifest["skills"][name], "path": name}
+            for name in resolved
+        },
+    }
+    metadata_relative = Path(RECEIPT_NAMESPACE) / harness
+    planned.extend(
+        (
+            (
+                metadata_relative / "selection.json",
+                (json.dumps(selection, indent=2, sort_keys=True) + "\n").encode(
+                    "utf-8"
+                ),
+            ),
+            (metadata_relative / "UPSTREAM_LICENSE", bundle_files["UPSTREAM_LICENSE"]),
+        )
+    )
+    planned.sort(key=lambda item: item[0].as_posix())
+    return resolved, planned
+
+
+def _file_records(planned: list[tuple[Path, bytes]]) -> list[dict[str, object]]:
+    return [
+        {
+            "path": relative.as_posix(),
+            "sha256": sha256_bytes(content),
+            "size": len(content),
+        }
+        for relative, content in planned
+    ]
+
+
+def _checked_owned_file(path: Path, record: dict[str, object]) -> bool:
+    """Return presence after requiring any entry to match its canonical record."""
+
+    if path.is_symlink():
+        raise ValueError(f"owned install path is a symlink: {path}")
+    if not path.exists():
+        return False
+    if not path.is_file():
+        raise ValueError(f"owned install path is not a regular file: {path}")
+    content = path.read_bytes()
+    if record["size"] != len(content) or record["sha256"] != sha256_bytes(content):
+        raise ValueError(f"owned install file was modified: {path}")
+    return True
+
+
+def _remove_empty_owned_tree(root: Path) -> None:
+    """Prune empty descendants and root without walking above this owned leaf."""
+
+    if root.is_symlink() or not root.is_dir():
+        return
+    directories = [path for path in root.rglob("*") if path.is_dir()]
+    for directory in sorted(
+        directories, key=lambda path: len(path.parts), reverse=True
+    ):
+        if not directory.is_symlink():
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+
+
+def _validate_quarantine_tree(
+    root: Path, allowed_files: set[Path], allowed_directories: set[Path]
+) -> None:
+    if root.is_symlink():
+        raise ValueError("uninstall quarantine must not be a symlink")
+    if not root.exists():
+        return
+    if not root.is_dir():
+        raise ValueError("uninstall quarantine must be a directory")
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"uninstall quarantine contains a symlink: {path}")
+        if path.is_dir():
+            if path not in allowed_directories:
+                raise ValueError(f"uninstall quarantine has an unknown directory: {path}")
+        elif path.is_file():
+            if path not in allowed_files:
+                raise ValueError(f"uninstall quarantine has an unknown file: {path}")
+        else:
+            raise ValueError(f"uninstall quarantine has a special entry: {path}")
+
+
+def install_selection(
+    source_root: Path,
+    target_root: Path,
+    harness: str,
+    selected: list[str],
+) -> tuple[str, ...]:
+    """Install selected linked skills into an isolated harness root.
+
+    Existing unrelated skills are preserved.  Any selected-skill collision or
+    existing receipt fails closed before a byte is written.
+    """
+
+    spec = HARNESS_REGISTRY.get(harness)
+    if spec is None:
+        raise ValueError(f"unknown harness {harness!r}")
+    if (
+        not selected
+        or not all(isinstance(name, str) and name for name in selected)
+        or len(set(selected)) != len(selected)
+    ):
+        raise ValueError("selected skills must be a nonempty unique string list")
+    bundle_root = _harness_bundle_root(source_root, harness)
+    manifest, bundle_files = _verify_harness_bundle(bundle_root, harness)
+    resolved, planned = _selection_plan(
+        harness, manifest, bundle_files, selected
+    )
+
+    target_root.mkdir(parents=True, exist_ok=True)
+    receipt_relative = Path(RECEIPT_NAMESPACE) / harness / RECEIPT_NAME
+    receipt_path = _target_path(target_root, receipt_relative)
+    metadata_root = receipt_path.parent
+    if metadata_root.exists() or metadata_root.is_symlink():
+        raise FileExistsError(f"install metadata already exists: {metadata_root}")
+
+    install_root = _safe_relative(spec.install_subdir)
+    for name in resolved:
+        destination_root = install_root / name
+        destination = _target_path(target_root, destination_root)
+        if destination.exists() or destination.is_symlink():
+            raise FileExistsError(
+                f"selected skill already exists: {destination_root.as_posix()}"
+            )
+    for relative, _ in planned:
+        target = _target_path(target_root, relative)
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(f"install destination already exists: {relative}")
+
+    receipt = {
+        "schema_version": RECEIPT_SCHEMA_VERSION,
+        "harness": harness,
+        "install_subdir": spec.install_subdir,
+        "selected": selected,
+        "resolved": list(resolved),
+        "files": _file_records(planned),
+    }
+    created: list[Path] = []
+    created_directories: list[Path] = []
+    try:
+        for relative, content in planned:
+            target = _target_path(target_root, relative)
+            _create_parent_directories(target, target_root, created_directories)
+            with target.open("xb") as output:
+                created.append(target)
+                output.write(content)
+        _create_parent_directories(receipt_path, target_root, created_directories)
+        with receipt_path.open("x", encoding="utf-8") as output:
+            created.append(receipt_path)
+            output.write(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    except BaseException:
+        for target in reversed(created):
+            if target.is_file() or target.is_symlink():
+                target.unlink()
+        for directory in reversed(created_directories):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        raise
+    return resolved
+
+
+def uninstall_selection(target_root: Path, harness: str) -> tuple[str, ...]:
+    """Remove only checksum-matching files owned by one install receipt."""
+
+    if harness not in HARNESS_REGISTRY:
+        raise ValueError(f"unknown harness {harness!r}")
+    receipt_relative = Path(RECEIPT_NAMESPACE) / harness / RECEIPT_NAME
+    receipt_path = _target_path(target_root, receipt_relative)
+    if receipt_path.is_symlink():
+        raise ValueError("install receipt must not be a symlink")
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if (
+        receipt.get("schema_version") != RECEIPT_SCHEMA_VERSION
+        or receipt.get("harness") != harness
+    ):
+        raise ValueError("install receipt does not match the requested harness")
+    spec = HARNESS_REGISTRY[harness]
+    if receipt.get("install_subdir") != spec.install_subdir:
+        raise ValueError("install receipt names the wrong harness skill root")
+    selected = receipt.get("selected")
+    resolved = receipt.get("resolved")
+    if (
+        not isinstance(selected, list)
+        or not selected
+        or not all(isinstance(item, str) and item for item in selected)
+        or len(set(selected)) != len(selected)
+        or not isinstance(resolved, list)
+        or not resolved
+        or not all(isinstance(item, str) and item for item in resolved)
+    ):
+        raise ValueError("install receipt has invalid selected or resolved skills")
+
+    canonical_manifest, canonical_files = _canonical_harness_files(harness)
+    canonical_resolved, canonical_planned = _selection_plan(
+        harness, canonical_manifest, canonical_files, selected
+    )
+    if resolved != list(canonical_resolved):
+        raise ValueError("install receipt dependency closure is not canonical")
+    expected_records = _file_records(canonical_planned)
+    records = receipt.get("files")
+    if records != expected_records:
+        raise ValueError("install receipt file inventory is not canonical or complete")
+
+    metadata_root = receipt_path.parent
+    quarantine_relative = Path(RECEIPT_NAMESPACE) / harness / QUARANTINE_NAME
+    quarantine_files_relative = quarantine_relative / "files"
+    quarantine_root = _target_path(target_root, quarantine_relative)
+    quarantine_files_root = _target_path(target_root, quarantine_files_relative)
+    phase_marker = _target_path(
+        target_root, quarantine_relative / QUARANTINE_PHASE
+    )
+    staged: list[tuple[Path, Path, dict[str, object]]] = []
+    allowed_files: set[Path] = set()
+    allowed_directories = {quarantine_root, quarantine_files_root, phase_marker}
+    for record in expected_records:
+        relative = _safe_relative(str(record["path"]))
+        original = _target_path(target_root, relative)
+        quarantine = _target_path(
+            target_root, quarantine_files_relative / relative
+        )
+        staged.append((original, quarantine, record))
+        allowed_files.add(quarantine)
+        allowed_directories.update(
+            parent
+            for parent in quarantine.parents
+            if parent == quarantine_root or quarantine_root in parent.parents
+        )
+
+    if phase_marker.is_symlink() or (
+        phase_marker.exists() and not phase_marker.is_dir()
+    ):
+        raise ValueError("uninstall quarantine phase marker is unsafe")
+    staged_phase = phase_marker.is_dir()
+    _validate_quarantine_tree(
+        quarantine_root, allowed_files, allowed_directories
+    )
+
+    states: list[tuple[bool, bool]] = []
+    for original, quarantine, record in staged:
+        original_exists = _checked_owned_file(original, record)
+        quarantine_exists = _checked_owned_file(quarantine, record)
+        if staged_phase:
+            if original_exists:
+                raise ValueError("staged uninstall unexpectedly has original files")
+        elif original_exists == quarantine_exists:
+            raise ValueError(
+                "owned file must exist in exactly one original or quarantine path"
+            )
+        states.append((original_exists, quarantine_exists))
+
+    if not staged_phase:
+        for (original, quarantine, _), (original_exists, _) in zip(staged, states):
+            if original_exists:
+                _create_parent_directories(quarantine, target_root, [])
+                original.rename(quarantine)
+        phase_marker.mkdir()
+
+    for _, quarantine, _ in staged:
+        if quarantine.is_symlink():
+            raise ValueError("staged uninstall file became a symlink")
+        if quarantine.exists():
+            quarantine.unlink()
+    receipt_path.unlink()
+    _remove_empty_owned_tree(quarantine_root)
+
+    install_root = _safe_relative(spec.install_subdir)
+    for name in canonical_resolved:
+        _remove_empty_owned_tree(_target_path(target_root, install_root / name))
+    _remove_empty_owned_tree(metadata_root)
+    return canonical_resolved
