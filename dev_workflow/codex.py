@@ -158,11 +158,18 @@ def normalize_native_response(
         if isinstance(entry, Mapping):
             entry = entry.get("answers")
         if isinstance(entry, list):
-            if len(entry) != 1:
+            if not entry or any(
+                not isinstance(value, str) or not value.strip() for value in entry
+            ):
                 raise ValueError(
-                    f"native answer for {question.id!r} must contain exactly one value"
+                    f"native answer for {question.id!r} must contain non-empty strings"
                 )
-            entry = entry[0]
+            values = [value.strip() for value in entry]
+            sentinel = values[0].casefold()
+            if sentinel in {"none of the above", "other"} and len(values) > 1:
+                entry = " ".join(values[1:])
+            else:
+                entry = " — ".join(values)
         if not isinstance(entry, str) or not entry.strip():
             raise ValueError(f"native answer for {question.id!r} must be a non-empty string")
         normalized[question.id] = entry.strip()

@@ -19,7 +19,8 @@ that delegates to it; callers must not copy or fork the interview logic.
 1. Snapshot the complete frontier before invoking a harness tool.
 2. Partition that immutable snapshot only when the harness limits one call.
 3. Collect and normalize every answer from every partition, including custom
-   `Other` values.
+   `Other` values and notes appended to a selected option. Discard a native
+   `Other` sentinel, never the user's free-form text.
 4. Commit only the complete snapshot. Never expose decisions unblocked by a
    partial partition.
 5. Recompute the frontier and repeat.

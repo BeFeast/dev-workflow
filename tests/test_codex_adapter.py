@@ -116,6 +116,44 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(state.answers["scope"].value, "Keep both linked skills")
         self.assertTrue(state.answers["scope"].custom)
 
+    def test_native_response_preserves_option_notes_and_other_text(self) -> None:
+        tree = DesignTree([root("delivery"), root("scope")])
+        snapshot = tree.snapshot(InterviewState())
+        normalized = normalize_native_response(
+            snapshot.questions,
+            {
+                "answers": {
+                    "delivery": {
+                        "answers": [
+                            "Durability first (Recommended)",
+                            "Only if generation stays deterministic",
+                        ]
+                    },
+                    "scope": {
+                        "answers": [
+                            "None of the above",
+                            "Keep both linked skills",
+                            "and retain attribution",
+                        ]
+                    },
+                }
+            },
+        )
+        self.assertEqual(
+            normalized["delivery"],
+            "Durability first (Recommended) — Only if generation stays deterministic",
+        )
+        self.assertEqual(
+            normalized["scope"], "Keep both linked skills and retain attribution"
+        )
+        state = tree.commit_snapshot(InterviewState(), snapshot, normalized)
+        self.assertTrue(state.answers["delivery"].custom)
+        self.assertEqual(
+            state.answers["scope"].value,
+            "Keep both linked skills and retain attribution",
+        )
+        self.assertTrue(state.answers["scope"].custom)
+
     def test_unavailable_tool_fallback_is_explicit_and_supports_other(self) -> None:
         tree = DesignTree([root("delivery")])
         snapshot = tree.snapshot(InterviewState())

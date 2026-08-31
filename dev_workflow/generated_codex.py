@@ -98,7 +98,9 @@ the native questionnaire UI.
 If the frontier snapshot has more than three questions, partition that snapshot
 into ordered chunks of at most three. Collect every chunk before applying any
 answer or recomputing the tree. Normalize selected options and free-form Other
-answers only after the whole snapshot is answered.
+answers only after the whole snapshot is answered. Preserve appended native
+notes. For an Other response, discard only the native sentinel and keep all of
+the user's free-form text.
 
 ## Use the unavailable-tool fallback
 
