@@ -180,6 +180,8 @@ def verify_portable_bundle(root: Path) -> dict[str, object]:
     """Verify every portable payload byte against the top-level manifest."""
 
     manifest_path = root / "manifest.json"
+    if root.is_symlink() or manifest_path.is_symlink() or not manifest_path.is_file():
+        raise ValueError("portable root and manifest must be regular non-symlink paths")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("artifact") != "dev-workflow-multiharness":
         raise ValueError("not a dev-workflow multi-harness artifact")
@@ -195,11 +197,17 @@ def verify_portable_bundle(root: Path) -> dict[str, object]:
     if not isinstance(records, dict):
         raise ValueError("portable manifest must contain file checksums")
 
-    actual = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and path != manifest_path
-    }
+    actual: set[str] = set()
+    for path in root.rglob("*"):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            raise ValueError(f"portable tree contains a symlink: {relative}")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise ValueError(f"portable tree contains a special entry: {relative}")
+        if path != manifest_path:
+            actual.add(relative)
     if actual != set(records):
         raise ValueError("portable payload files do not match the manifest")
     for relative, record in records.items():
