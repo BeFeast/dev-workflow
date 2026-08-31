@@ -1,0 +1,30 @@
+{
+  "harness": "claude-code",
+  "schema_version": 1,
+  "skills": {
+    "grill-me": {
+      "claude_frontmatter": {
+        "disable-model-invocation": true
+      },
+      "invocation": "user",
+      "path": "skills/grill-me",
+      "requires": [
+        "grilling"
+      ]
+    },
+    "grilling": {
+      "claude_frontmatter": {
+        "user-invocable": false
+      },
+      "invocation": "model",
+      "path": "skills/grilling",
+      "requires": []
+    }
+  },
+  "upstream": {
+    "commit": "6654f6b60cd9d5be8b54c6fafe44346dabeb3b76",
+    "copyright": "Copyright (c) 2026 Matt Pocock",
+    "license": "MIT",
+    "repository": "mattpocock/skills"
+  }
+}
