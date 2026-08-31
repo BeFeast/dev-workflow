@@ -12,6 +12,8 @@ from .multiharness import HARNESS_REGISTRY, sha256_bytes, verify_portable_bundle
 RECEIPT_NAMESPACE = ".dev-workflow"
 RECEIPT_NAME = "install-receipt.json"
 RECEIPT_SCHEMA_VERSION = 2
+QUARANTINE_NAME = "uninstall-quarantine"
+QUARANTINE_PHASE = "staged"
 
 
 def resolve_skills(manifest: dict, selected: list[str]) -> tuple[str, ...]:
@@ -243,6 +245,63 @@ def _file_records(planned: list[tuple[Path, bytes]]) -> list[dict[str, object]]:
     ]
 
 
+def _checked_owned_file(path: Path, record: dict[str, object]) -> bool:
+    """Return presence after requiring any entry to match its canonical record."""
+
+    if path.is_symlink():
+        raise ValueError(f"owned install path is a symlink: {path}")
+    if not path.exists():
+        return False
+    if not path.is_file():
+        raise ValueError(f"owned install path is not a regular file: {path}")
+    content = path.read_bytes()
+    if record["size"] != len(content) or record["sha256"] != sha256_bytes(content):
+        raise ValueError(f"owned install file was modified: {path}")
+    return True
+
+
+def _remove_empty_owned_tree(root: Path) -> None:
+    """Prune empty descendants and root without walking above this owned leaf."""
+
+    if root.is_symlink() or not root.is_dir():
+        return
+    directories = [path for path in root.rglob("*") if path.is_dir()]
+    for directory in sorted(
+        directories, key=lambda path: len(path.parts), reverse=True
+    ):
+        if not directory.is_symlink():
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+    try:
+        root.rmdir()
+    except OSError:
+        pass
+
+
+def _validate_quarantine_tree(
+    root: Path, allowed_files: set[Path], allowed_directories: set[Path]
+) -> None:
+    if root.is_symlink():
+        raise ValueError("uninstall quarantine must not be a symlink")
+    if not root.exists():
+        return
+    if not root.is_dir():
+        raise ValueError("uninstall quarantine must be a directory")
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise ValueError(f"uninstall quarantine contains a symlink: {path}")
+        if path.is_dir():
+            if path not in allowed_directories:
+                raise ValueError(f"uninstall quarantine has an unknown directory: {path}")
+        elif path.is_file():
+            if path not in allowed_files:
+                raise ValueError(f"uninstall quarantine has an unknown file: {path}")
+        else:
+            raise ValueError(f"uninstall quarantine has a special entry: {path}")
+
+
 def install_selection(
     source_root: Path,
     target_root: Path,
@@ -297,7 +356,6 @@ def install_selection(
         "selected": selected,
         "resolved": list(resolved),
         "files": _file_records(planned),
-        "directories": [],
     }
     created: list[Path] = []
     created_directories: list[Path] = []
@@ -309,10 +367,6 @@ def install_selection(
                 created.append(target)
                 output.write(content)
         _create_parent_directories(receipt_path, target_root, created_directories)
-        receipt["directories"] = sorted(
-            directory.relative_to(target_root).as_posix()
-            for directory in created_directories
-        )
         with receipt_path.open("x", encoding="utf-8") as output:
             created.append(receipt_path)
             output.write(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
@@ -371,58 +425,70 @@ def uninstall_selection(target_root: Path, harness: str) -> tuple[str, ...]:
     if records != expected_records:
         raise ValueError("install receipt file inventory is not canonical or complete")
 
-    directory_records = receipt.get("directories")
-    if (
-        not isinstance(directory_records, list)
-        or not all(isinstance(item, str) for item in directory_records)
-        or len(set(directory_records)) != len(directory_records)
-        or directory_records != sorted(directory_records)
-    ):
-        raise ValueError("install receipt has invalid directory ownership")
-    required_metadata_directory = Path(RECEIPT_NAMESPACE) / harness
-    if required_metadata_directory.as_posix() not in directory_records:
-        raise ValueError("install receipt omits its owned metadata directory")
-    receipt_relative = Path(RECEIPT_NAMESPACE) / harness / RECEIPT_NAME
-    allowed_directories: set[Path] = set()
-    for relative, _ in canonical_planned + [(receipt_relative, b"")]:
-        allowed_directories.update(
-            parent
-            for parent in relative.parents
-            if parent != Path(".") and parent.parts
-        )
-    owned_directories: list[Path] = []
-    for value in directory_records:
-        relative = _safe_relative(value)
-        if relative not in allowed_directories:
-            raise ValueError(
-                f"install receipt claims an unrelated directory: {relative}"
-            )
-        directory = _target_path(target_root, relative)
-        if directory.is_symlink() or not directory.is_dir():
-            raise ValueError(f"owned install directory is missing or unsafe: {relative}")
-        owned_directories.append(directory)
-
-    owned: list[Path] = []
+    metadata_root = receipt_path.parent
+    quarantine_relative = Path(RECEIPT_NAMESPACE) / harness / QUARANTINE_NAME
+    quarantine_files_relative = quarantine_relative / "files"
+    quarantine_root = _target_path(target_root, quarantine_relative)
+    quarantine_files_root = _target_path(target_root, quarantine_files_relative)
+    phase_marker = _target_path(
+        target_root, quarantine_relative / QUARANTINE_PHASE
+    )
+    staged: list[tuple[Path, Path, dict[str, object]]] = []
+    allowed_files: set[Path] = set()
+    allowed_directories = {quarantine_root, quarantine_files_root, phase_marker}
     for record in expected_records:
         relative = _safe_relative(str(record["path"]))
-        path = _target_path(target_root, relative)
-        if not path.is_file() or path.is_symlink():
-            raise ValueError(f"owned install file is missing or unsafe: {relative}")
-        content = path.read_bytes()
-        if record["size"] != len(content) or record["sha256"] != sha256_bytes(
-            content
-        ):
-            raise ValueError(f"owned install file was modified: {relative}")
-        owned.append(path)
+        original = _target_path(target_root, relative)
+        quarantine = _target_path(
+            target_root, quarantine_files_relative / relative
+        )
+        staged.append((original, quarantine, record))
+        allowed_files.add(quarantine)
+        allowed_directories.update(
+            parent
+            for parent in quarantine.parents
+            if parent == quarantine_root or quarantine_root in parent.parents
+        )
 
-    for path in reversed(owned):
-        path.unlink()
-    receipt_path.unlink()
-    for directory in sorted(
-        owned_directories, key=lambda path: len(path.parts), reverse=True
+    if phase_marker.is_symlink() or (
+        phase_marker.exists() and not phase_marker.is_dir()
     ):
-        try:
-            directory.rmdir()
-        except OSError:
-            pass
+        raise ValueError("uninstall quarantine phase marker is unsafe")
+    staged_phase = phase_marker.is_dir()
+    _validate_quarantine_tree(
+        quarantine_root, allowed_files, allowed_directories
+    )
+
+    states: list[tuple[bool, bool]] = []
+    for original, quarantine, record in staged:
+        original_exists = _checked_owned_file(original, record)
+        quarantine_exists = _checked_owned_file(quarantine, record)
+        if staged_phase:
+            if original_exists:
+                raise ValueError("staged uninstall unexpectedly has original files")
+        elif original_exists == quarantine_exists:
+            raise ValueError(
+                "owned file must exist in exactly one original or quarantine path"
+            )
+        states.append((original_exists, quarantine_exists))
+
+    if not staged_phase:
+        for (original, quarantine, _), (original_exists, _) in zip(staged, states):
+            if original_exists:
+                _create_parent_directories(quarantine, target_root, [])
+                original.rename(quarantine)
+        phase_marker.mkdir()
+
+    for _, quarantine, _ in staged:
+        if quarantine.is_symlink():
+            raise ValueError("staged uninstall file became a symlink")
+        if quarantine.exists():
+            quarantine.unlink()
+    receipt_path.unlink()
+    _remove_empty_owned_tree(quarantine_root)
+
+    install_root = _safe_relative(spec.install_subdir)
+    for name in canonical_resolved:
+        _remove_empty_owned_tree(_target_path(target_root, install_root / name))
+    _remove_empty_owned_tree(metadata_root)
     return canonical_resolved

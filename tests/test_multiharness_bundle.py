@@ -9,7 +9,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from dev_workflow.bundle import install_selection, uninstall_selection
+from dev_workflow.bundle import (
+    QUARANTINE_NAME,
+    install_selection,
+    uninstall_selection,
+)
 from dev_workflow.multiharness import (
     HARNESS_REGISTRY,
     build_portable_bundle,
@@ -142,12 +146,24 @@ class MultiHarnessBundleTests(unittest.TestCase):
                             / "install-receipt.json"
                         ).read_text(encoding="utf-8")
                     )
-                    self.assertNotIn(
-                        Path(spec.install_subdir).parts[0], receipt["directories"]
+                    self.assertNotIn("directories", receipt)
+                    receipt["directories"] = [
+                        Path(spec.install_subdir).parts[0]
+                    ]
+                    (
+                        isolated
+                        / ".dev-workflow"
+                        / harness
+                        / "install-receipt.json"
+                    ).write_text(
+                        json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8",
                     )
                     uninstall_selection(isolated, harness)
                     self.assertTrue(harness_ancestor.is_dir())
-                    self.assertEqual(list(harness_ancestor.iterdir()), [])
+                    skills_ancestor = isolated / spec.install_subdir
+                    self.assertTrue(skills_ancestor.is_dir())
+                    self.assertEqual(list(skills_ancestor.iterdir()), [])
 
     def test_selecting_primitive_pulls_no_wrapper_or_unrelated_skill(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -329,6 +345,74 @@ class MultiHarnessBundleTests(unittest.TestCase):
                 install_selection(artifact, isolated, "codex", ["grilling"]),
                 ("grilling",),
             )
+
+    def test_interrupted_second_uninstall_move_is_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "artifact"
+            isolated = root / "isolated"
+            build_portable_bundle(artifact)
+            unrelated = isolated / ".codex/skills/unrelated/SKILL.md"
+            unrelated.parent.mkdir(parents=True)
+            unrelated.write_text("keep me\n", encoding="utf-8")
+            install_selection(artifact, isolated, "codex", ["grill-me"])
+            receipt = isolated / ".dev-workflow/codex/install-receipt.json"
+            original_rename = Path.rename
+            move_count = 0
+
+            def interrupt_second_move(path, target):
+                nonlocal move_count
+                if QUARANTINE_NAME in Path(target).parts:
+                    move_count += 1
+                    if move_count == 2:
+                        raise KeyboardInterrupt
+                return original_rename(path, target)
+
+            with patch.object(Path, "rename", new=interrupt_second_move):
+                with self.assertRaises(KeyboardInterrupt):
+                    uninstall_selection(isolated, "codex")
+            self.assertTrue(receipt.is_file())
+            self.assertEqual(
+                uninstall_selection(isolated, "codex"),
+                ("grilling", "grill-me"),
+            )
+            self.assertFalse((isolated / ".codex/skills/grill-me").exists())
+            self.assertFalse(receipt.exists())
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_interrupted_second_quarantine_delete_is_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "artifact"
+            isolated = root / "isolated"
+            build_portable_bundle(artifact)
+            unrelated = isolated / ".claude/skills/unrelated/SKILL.md"
+            unrelated.parent.mkdir(parents=True)
+            unrelated.write_text("keep me\n", encoding="utf-8")
+            install_selection(artifact, isolated, "claude", ["grill-me"])
+            receipt = isolated / ".dev-workflow/claude/install-receipt.json"
+            original_unlink = Path.unlink
+            delete_count = 0
+
+            def interrupt_second_delete(path, *args, **kwargs):
+                nonlocal delete_count
+                if QUARANTINE_NAME in path.parts:
+                    delete_count += 1
+                    if delete_count == 2:
+                        raise KeyboardInterrupt
+                return original_unlink(path, *args, **kwargs)
+
+            with patch.object(Path, "unlink", new=interrupt_second_delete):
+                with self.assertRaises(KeyboardInterrupt):
+                    uninstall_selection(isolated, "claude")
+            self.assertTrue(receipt.is_file())
+            self.assertEqual(
+                uninstall_selection(isolated, "claude"),
+                ("grilling", "grill-me"),
+            )
+            self.assertFalse((isolated / ".claude/skills/grill-me").exists())
+            self.assertFalse(receipt.exists())
+            self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me\n")
 
     def test_general_cli_requires_harness_and_round_trips_fixture_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
