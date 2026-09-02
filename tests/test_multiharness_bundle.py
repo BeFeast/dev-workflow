@@ -16,9 +16,14 @@ from dev_workflow.bundle import (
 )
 from dev_workflow.multiharness import (
     HARNESS_REGISTRY,
+    RELEASE_VERSION,
     build_portable_bundle,
+    bundle_checksum,
     portable_file_bytes,
+    release_descriptor,
     verify_portable_bundle,
+    verify_release,
+    write_release,
 )
 
 
@@ -50,6 +55,39 @@ class MultiHarnessBundleTests(unittest.TestCase):
                         )
             notice = (first / "UPSTREAM_LICENSE").read_text(encoding="utf-8")
             self.assertIn("Copyright (c) 2026 Matt Pocock", notice)
+
+    def test_release_binds_source_sha_to_checksum_and_upstream(self) -> None:
+        commit = "0" * 39 + "a"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "first"
+            second = root / "second"
+            first_manifest = build_portable_bundle(first)
+            build_portable_bundle(second)
+            release_path = root / "release.json"
+            descriptor = write_release(first, release_path, commit)
+            self.assertEqual(descriptor["version"], RELEASE_VERSION)
+            self.assertEqual(descriptor["source"]["commit"], commit)
+            self.assertEqual(descriptor["source"]["repository"], "BeFeast/dev-workflow")
+            self.assertEqual(
+                descriptor["bundle"]["checksum"], bundle_checksum(first_manifest)
+            )
+            self.assertEqual(descriptor["upstream"], first_manifest["upstream"])
+            # The checksum is a property of the source, not the materialization,
+            # so an independent exact-SHA rebuild verifies the same release.
+            self.assertEqual(verify_release(second, release_path, commit), descriptor)
+
+    def test_release_rejects_short_commit_and_foreign_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "artifact"
+            manifest = build_portable_bundle(artifact)
+            with self.assertRaisesRegex(ValueError, "40-character"):
+                release_descriptor("abc123", manifest)
+            release_path = root / "release.json"
+            write_release(artifact, release_path, "1" * 40)
+            with self.assertRaisesRegex(ValueError, "differs"):
+                verify_release(artifact, release_path, "2" * 40)
 
     def test_portable_verification_rejects_tampered_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
