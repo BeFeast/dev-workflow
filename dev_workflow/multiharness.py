@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Callable, Mapping
 
 from .generated_claude import (
@@ -26,6 +27,8 @@ from .generated_opencode import (
 
 
 PORTABLE_SCHEMA_VERSION = 1
+RELEASE_VERSION = "0.1.0"
+_FULL_COMMIT = re.compile(r"[0-9a-f]{40}")
 
 
 @dataclass(frozen=True)
@@ -230,3 +233,73 @@ def portable_file_bytes(root: Path) -> dict[str, bytes]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def bundle_checksum(manifest: Mapping[str, object]) -> str:
+    """Return a stable digest over the canonical portable manifest bytes.
+
+    The manifest already pins every payload's own ``sha256`` and ``size``, so
+    hashing its canonical serialization binds the whole bundle in one value.
+    """
+
+    canonical = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    return sha256_bytes(canonical.encode("utf-8"))
+
+
+def release_descriptor(
+    source_commit: str, manifest: Mapping[str, object]
+) -> dict[str, object]:
+    """Bind a full source commit to the deterministic bundle checksum.
+
+    The descriptor carries no host path or secret: only the public source
+    coordinates, the reproducible checksum, and the retained upstream notice.
+    """
+
+    if not isinstance(source_commit, str) or not _FULL_COMMIT.fullmatch(source_commit):
+        raise ValueError("release requires a full 40-character hex source commit")
+    if manifest.get("artifact") != "dev-workflow-multiharness":
+        raise ValueError("release manifest is not a dev-workflow multi-harness artifact")
+    files = manifest.get("files")
+    if not isinstance(files, dict) or not files:
+        raise ValueError("release manifest must contain payload checksums")
+    if manifest.get("upstream") != _upstream_metadata():
+        raise ValueError("release manifest attribution differs from the pinned source")
+    return {
+        "artifact": "dev-workflow-multiharness",
+        "version": RELEASE_VERSION,
+        "source": {
+            "repository": "BeFeast/dev-workflow",
+            "commit": source_commit,
+        },
+        "bundle": {
+            "algorithm": "sha256",
+            "checksum": bundle_checksum(manifest),
+            "manifest_files": len(files),
+        },
+        "upstream": _upstream_metadata(),
+    }
+
+
+def write_release(bundle_root: Path, release_path: Path, source_commit: str) -> dict[str, object]:
+    """Verify a built portable tree and emit its release binding beside it."""
+
+    manifest = verify_portable_bundle(bundle_root)
+    descriptor = release_descriptor(source_commit, manifest)
+    release_path.write_text(
+        json.dumps(descriptor, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return descriptor
+
+
+def verify_release(bundle_root: Path, release_path: Path, source_commit: str) -> dict[str, object]:
+    """Confirm a release binding matches the exact-SHA rebuilt checksum."""
+
+    if release_path.is_symlink() or not release_path.is_file():
+        raise ValueError("release descriptor must be a regular non-symlink file")
+    recorded = json.loads(release_path.read_text(encoding="utf-8"))
+    manifest = verify_portable_bundle(bundle_root)
+    expected = release_descriptor(source_commit, manifest)
+    if recorded != expected:
+        raise ValueError("release descriptor differs from the exact-SHA materialization")
+    return expected
