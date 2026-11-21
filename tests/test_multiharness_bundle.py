@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from dev_workflow.bundle import (
     QUARANTINE_NAME,
+    TERMINAL_RECEIPT_NAME,
     install_selection,
     uninstall_selection,
 )
@@ -413,6 +414,86 @@ class MultiHarnessBundleTests(unittest.TestCase):
             self.assertFalse((isolated / ".claude/skills/grill-me").exists())
             self.assertFalse(receipt.exists())
             self.assertEqual(unrelated.read_text(encoding="utf-8"), "keep me\n")
+
+    def test_interrupted_after_receipt_relocation_resumes_terminal_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "artifact"
+            isolated = root / "isolated"
+            build_portable_bundle(artifact)
+            install_selection(artifact, isolated, "codex", ["grill-me"])
+            receipt = isolated / ".dev-workflow/codex/install-receipt.json"
+            terminal = (
+                isolated
+                / ".dev-workflow"
+                / f"codex-{TERMINAL_RECEIPT_NAME}"
+            )
+            original_rename = Path.rename
+
+            def relocate_then_interrupt(path, target):
+                result = original_rename(path, target)
+                if path == receipt and Path(target) == terminal:
+                    raise KeyboardInterrupt
+                return result
+
+            with patch.object(Path, "rename", new=relocate_then_interrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    uninstall_selection(isolated, "codex")
+            self.assertFalse(receipt.exists())
+            self.assertTrue(terminal.is_file())
+            self.assertEqual(
+                uninstall_selection(isolated, "codex"),
+                ("grilling", "grill-me"),
+            )
+            self.assertFalse(terminal.exists())
+            self.assertFalse((isolated / ".dev-workflow/codex").exists())
+
+    def test_terminal_rmdir_failure_retains_receipt_for_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "artifact"
+            isolated = root / "isolated"
+            build_portable_bundle(artifact)
+            install_selection(artifact, isolated, "claude", ["grill-me"])
+            metadata_root = isolated / ".dev-workflow/claude"
+            terminal = (
+                isolated
+                / ".dev-workflow"
+                / f"claude-{TERMINAL_RECEIPT_NAME}"
+            )
+            original_rmdir = Path.rmdir
+            failed = False
+
+            def fail_metadata_rmdir_once(path):
+                nonlocal failed
+                if path == metadata_root and not failed:
+                    failed = True
+                    raise OSError("injected rmdir failure")
+                return original_rmdir(path)
+
+            with patch.object(Path, "rmdir", new=fail_metadata_rmdir_once):
+                with self.assertRaisesRegex(ValueError, "cleanup is incomplete"):
+                    uninstall_selection(isolated, "claude")
+            self.assertTrue(metadata_root.is_dir())
+            self.assertTrue(terminal.is_file())
+            self.assertEqual(
+                uninstall_selection(isolated, "claude"),
+                ("grilling", "grill-me"),
+            )
+            self.assertFalse(metadata_root.exists())
+            self.assertFalse(terminal.exists())
+
+    def test_install_rejects_arbitrary_empty_metadata_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifact = root / "artifact"
+            isolated = root / "isolated"
+            build_portable_bundle(artifact)
+            metadata_root = isolated / ".dev-workflow/opencode"
+            metadata_root.mkdir(parents=True)
+            with self.assertRaisesRegex(FileExistsError, "metadata already exists"):
+                install_selection(artifact, isolated, "opencode", ["grilling"])
+            self.assertTrue(metadata_root.is_dir())
 
     def test_general_cli_requires_harness_and_round_trips_fixture_root(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
