@@ -1,5 +1,7 @@
 # Dev Workflow
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 Native interactive questionnaire rounds replace Markdown-only grilling while preserving the complete linked grill-me -> grilling flow across Codex, Claude Code, and OpenCode.
 
 Project: `BeFeast/dev-workflow`.
@@ -29,3 +31,9 @@ python3 scripts/select_codex_skills.py \
 The target must be empty. This command is safe for isolated inspection and
 fixture roots; live harness installation remains a separate approval-gated
 delivery step.
+
+## License
+
+Original project material is available under [Apache 2.0](LICENSE). The
+[NOTICE](NOTICE) identifies adapted upstream skills distributed under MIT.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the CLA requirement.

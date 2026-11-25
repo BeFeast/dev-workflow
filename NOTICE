@@ -1,0 +1,11 @@
+Dev Workflow
+Copyright 2026 Oleg Kossoy
+
+Original project material is offered under Apache License 2.0. The prior MIT
+notice is retained in LICENSE-MIT.
+
+This project incorporates material from mattpocock/skills, copyright 2026
+Matt Pocock, under the MIT License. This includes the adapted skills under
+harnesses/ and the skill text and license reproduced by the generated bundle
+modules under dev_workflow/. Preserve the applicable UPSTREAM_LICENSE and
+copyright notices when distributing those materials.
