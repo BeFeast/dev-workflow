@@ -1,0 +1,6 @@
+interface:
+  display_name: "Grill Me"
+  short_description: "Start a native decision-tree interview"
+  default_prompt: "Use $grill-me to interview me until our plan is fully understood."
+policy:
+  allow_implicit_invocation: false

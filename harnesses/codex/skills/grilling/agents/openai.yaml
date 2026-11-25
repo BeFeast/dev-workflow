@@ -1,0 +1,6 @@
+interface:
+  display_name: "Grilling"
+  short_description: "Run reusable native questionnaire rounds"
+  default_prompt: "Use $grilling to stress-test this plan through native questionnaire rounds."
+policy:
+  allow_implicit_invocation: true
